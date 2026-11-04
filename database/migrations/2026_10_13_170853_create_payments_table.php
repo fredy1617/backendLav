@@ -16,6 +16,12 @@ return new class extends Migration
                 ->constrained('orders')
                 ->restrictOnDelete();
 
+            // Caja opcional: permite registrar pagos sin caja abierta
+            $table->foreignId('cash_register_id')
+                ->nullable()
+                ->constrained('cash_registers')
+                ->nullOnDelete();
+
             $table->string('receipt_folio')->nullable()->unique();
             $table->decimal('amount', 12, 2);
             $table->string('payment_method', 30);
@@ -26,6 +32,7 @@ return new class extends Migration
             $table->timestamps();
 
             $table->index(['order_id', 'paid_at']);
+            $table->index('cash_register_id');
         });
     }
 

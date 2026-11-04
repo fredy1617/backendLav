@@ -41,8 +41,10 @@ class PaymentController extends Controller
 
         $payment = DB::transaction(function () use ($validated) {
             /*------------------------------------------------------------------------
-            | 1. Buscar y bloquear la caja abierta del día
-            |--------------------------------------------------------------------------*/
+            | 1. Buscar y bloquear la caja abierta del día 
+
+            ***** QUITAMOS PROVICIONAL LA VALIDACION CAJA ABIERTA****
+            
             $caja = CashRegister::whereDate('date', today())
                 ->whereNull('closed_at')
                 ->lockForUpdate()
@@ -51,6 +53,7 @@ class PaymentController extends Controller
             if (!$caja) {
                 abort(422, 'No hay una caja abierta para hoy. Abre la caja antes de registrar pagos.');
             }
+            |--------------------------------------------------------------------------*/
 
             /*-----------------------------------------------------------------------
             | 2. Buscar y bloquear la orden
@@ -83,7 +86,7 @@ class PaymentController extends Controller
             | 4. Registrar el pago asociado a la caja
             |-------------------------------------------------------------------------*/
             $payment = $order->payments()->create([
-                'cash_register_id' => $caja->id,
+                'cash_register_id' => null,///QUITAMOS PROVICIONAL LA VALIDACION CAJA ABIERTA
                 'amount' => $importe,
                 'payment_method' => $validated['payment_method'],
                 'paid_at' => $validated['paid_at'] ?? now(),
