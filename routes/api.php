@@ -6,6 +6,8 @@ use Illuminate\Support\Facades\Route;
 use App\Http\Controllers\AuthController;
 use App\Http\Controllers\CashRegisterController;
 use App\Http\Controllers\CustomerController;
+use App\Http\Controllers\DashboardController;
+use App\Http\Controllers\LoyaltyController;
 use App\Http\Controllers\OrderController;
 use App\Http\Controllers\PaymentController;
 use App\Http\Controllers\SalesController;
@@ -28,6 +30,12 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
+   // ================== DASHBOARD ==========================
+    Route::get('/dashboard', [DashboardController::class, 'index']);
+    // Listado por categoría
+    Route::get('/dashboard/customers/segment/{segment}', [DashboardController::class, 'customers'])->where('segment', 'upcoming|frequent|recover');
+    // Detalle de cliente por ID
+    Route::get('/dashboard/customers/detail/{customerId}', [DashboardController::class, 'customerDetail'])->whereNumber('customerId');
 
     // ================== CLIENTES ==========================
     Route::apiResource('customers', CustomerController::class);
@@ -42,6 +50,7 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/orders/{id}/ticket', [OrderController::class, 'receiptTicket']);
     Route::patch('/orders/{id}/status', [OrderController::class, 'updateStatus']);
     Route::get('/orders/{id}/ticket-entrega', [ OrderController::class, 'ticketEntrega']);
+    Route::get('/customers/{customerId}/loyalty', [OrderController::class, 'customerLoyalty']);
 
     // =================  PAGOS ======================
     Route::apiResource('payments', PaymentController::class);
@@ -58,6 +67,8 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::post('/cash-register/movements', [CashRegisterController::class, 'movement']);
     Route::post('/cash-register/close', [CashRegisterController::class, 'close']);
 
+    Route::get('/customers/{id}/loyalty', [LoyaltyController::class, 'customer']);
+
     // ======================================
     // ADMINISTRACIÓN DE USUARIOS
     // SOLO ADMINISTRADOR
@@ -67,4 +78,6 @@ Route::middleware('auth:sanctum')->group(function () {
         Route::post('/users', [AuthController::class, 'store']);
         Route::patch('/users/{user}/toggle-active', [AuthController::class, 'toggleActive']);
     });
+
+
 });

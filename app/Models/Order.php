@@ -14,6 +14,8 @@ class Order extends Model
         'estimated_delivery_at',
         'status',
         'observations',
+        'subtotal',
+        'discount',
         'total',
     ];
 
@@ -22,6 +24,8 @@ class Order extends Model
         return [
             'received_at' => 'date:Y-m-d',
             'estimated_delivery_at' => 'date:Y-m-d',
+            'subtotal' => 'decimal:2',
+            'discount' => 'decimal:2',
             'total' => 'decimal:2',
         ];
     }

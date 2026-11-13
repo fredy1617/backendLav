@@ -8,6 +8,7 @@ use Barryvdh\DomPDF\Facade\Pdf;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Validation\Rule;
+use Illuminate\Validation\ValidationException;
 
 class OrderController extends Controller
 {
@@ -49,6 +50,14 @@ class OrderController extends Controller
                 'max:5000',
             ],
 
+            // Descuento general de toda la orden.
+            'discount' => [
+                'nullable',
+                'numeric',
+                'min:0',
+                'max:999999999',
+            ],
+
             'details' => [
                 'required',
                 'array',
@@ -77,9 +86,12 @@ class OrderController extends Controller
         ];
     }
 
+    /**
+     * Guarda los detalles y devuelve el subtotal de los servicios.
+     */
     private function saveDetails(Order $order, array $details): float
     {
-        $total = 0;
+        $subtotalGeneral = 0;
 
         foreach ($details as $item) {
             $service = Service::findOrFail($item['service_id']);
@@ -87,7 +99,7 @@ class OrderController extends Controller
             $quantity = (float) $item['quantity'];
             $unitPrice = round((float) $item['unit_price'], 2);
 
-            // El servidor calcula el subtotal; no confía en el navegador.
+            // El servidor calcula el subtotal.
             $subtotal = round($quantity * $unitPrice, 2);
 
             $order->details()->create([
@@ -99,12 +111,44 @@ class OrderController extends Controller
                 'subtotal' => $subtotal,
             ]);
 
-            $total = round($total + $subtotal, 2);
+            $subtotalGeneral = round(
+                $subtotalGeneral + $subtotal,
+                2
+            );
         }
 
-        return $total;
+        return $subtotalGeneral;
     }
 
+    /**
+     * Calcula subtotal, descuento y total.
+     */
+    private function actualizarTotales(
+        Order $order,
+        float $subtotal,
+        float $discount
+    ): void {
+        $subtotal = round($subtotal, 2);
+        $discount = round($discount, 2);
+
+        if ($discount > $subtotal) {
+            throw ValidationException::withMessages([
+                'discount' => [
+                    'El descuento no puede ser mayor al subtotal de la orden.',
+                ],
+            ]);
+        }
+
+        $order->update([
+            'subtotal' => $subtotal,
+            'discount' => $discount,
+            'total' => round($subtotal - $discount, 2),
+        ]);
+    }
+
+    /**
+     * Listado de órdenes.
+     */
     public function index(Request $request)
     {
         $query = Order::with(['customer', 'details'])
@@ -135,11 +179,15 @@ class OrderController extends Controller
         return response()->json($query->paginate(15));
     }
 
+    /**
+     * Crear orden.
+     */
     public function store(Request $request)
     {
         $validated = $request->validate($this->rules());
 
         $order = DB::transaction(function () use ($validated) {
+
             $order = Order::create([
                 'customer_id' => $validated['customer_id'],
                 'received_at' => $validated['received_at'],
@@ -147,15 +195,26 @@ class OrderController extends Controller
                     $validated['estimated_delivery_at'] ?? null,
                 'status' => $validated['status'],
                 'observations' => $validated['observations'] ?? null,
+                'subtotal' => 0,
+                'discount' => 0,
                 'total' => 0,
             ]);
 
-            $total = $this->saveDetails(
+            $subtotal = $this->saveDetails(
                 $order,
                 $validated['details']
             );
 
-            $order->update(['total' => $total]);
+            $discount = round(
+                (float) ($validated['discount'] ?? 0),
+                2
+            );
+
+            $this->actualizarTotales(
+                $order,
+                $subtotal,
+                $discount
+            );
 
             return $order;
         });
@@ -166,6 +225,9 @@ class OrderController extends Controller
         ], 201);
     }
 
+    /**
+     * Consultar orden.
+     */
     public function show(string $id)
     {
         $order = Order::with(['customer', 'details.service'])
@@ -176,11 +238,15 @@ class OrderController extends Controller
         ]);
     }
 
+    /**
+     * Actualizar orden.
+     */
     public function update(Request $request, string $id)
     {
         $validated = $request->validate($this->rules());
 
         $order = DB::transaction(function () use ($validated, $id) {
+
             $order = Order::findOrFail($id);
 
             $order->update([
@@ -192,15 +258,24 @@ class OrderController extends Controller
                 'observations' => $validated['observations'] ?? null,
             ]);
 
-            // Sustituye los detalles por los enviados desde el formulario.
+            // Sustituir los detalles anteriores.
             $order->details()->delete();
 
-            $total = $this->saveDetails(
+            $subtotal = $this->saveDetails(
                 $order,
                 $validated['details']
             );
 
-            $order->update(['total' => $total]);
+            $discount = round(
+                (float) ($validated['discount'] ?? 0),
+                2
+            );
+
+            $this->actualizarTotales(
+                $order,
+                $subtotal,
+                $discount
+            );
 
             return $order;
         });
@@ -211,6 +286,9 @@ class OrderController extends Controller
         ]);
     }
 
+    /**
+     * Eliminar orden.
+     */
     public function destroy(string $id)
     {
         $order = Order::findOrFail($id);
@@ -222,7 +300,64 @@ class OrderController extends Controller
         ]);
     }
 
-    
+    /**
+     * Consultar recomendación de descuento por lealtad.
+     *
+     * Se toman las últimas cinco órdenes entregadas del cliente.
+     * No se aplica ningún descuento automáticamente.
+     */
+    public function customerLoyalty(Request $request, string $customerId)
+    {
+        $request->validate([
+            'exclude_order_id' => [
+                'nullable',
+                'integer',
+                'exists:orders,id',
+            ],
+        ]);
+
+        $query = Order::where('customer_id', $customerId)
+            ->where('status', 'Entregada');
+
+        // Al editar una orden, no contarla como una orden anterior.
+        if ($request->filled('exclude_order_id')) {
+            $query->where(
+                'id',
+                '!=',
+                $request->exclude_order_id
+            );
+        }
+
+        $orders = $query
+            ->orderByDesc('id')
+            ->limit(5)
+            ->get(['id', 'total']);
+
+        $cantidad = $orders->count();
+
+        $gastoAnterior = round(
+            (float) $orders->sum('total'),
+            2
+        );
+
+        $recomendacion = $cantidad === 5
+            ? round($gastoAnterior * 0.10, 2)
+            : 0;
+
+        return response()->json([
+            'eligible' => $cantidad === 5,
+            'previous_orders' => $cantidad,
+            'spending' => $gastoAnterior,
+            'recommended_discount' => $recomendacion,
+            'message' => $cantidad === 5
+                ? 'Este cliente cuenta con cinco órdenes entregadas. Se recomienda un descuento del 10% sobre el gasto acumulado de esas órdenes.'
+                : "Este cliente tiene {$cantidad} de 5 órdenes entregadas necesarias para obtener una recomendación.",
+        ]);
+    }
+
+    /**
+     * Ticket de recepción.
+     */
     public function ticketRecepcion($id)
     {
         $order = Order::with(['customer', 'details'])
@@ -237,10 +372,14 @@ class OrderController extends Controller
             'ticket-recepcion-' . $order->id . '.pdf'
         );
     }
-    
+
+    /**
+     * Entregar orden.
+     */
     public function deliver($id)
     {
         $order = DB::transaction(function () use ($id) {
+
             $order = Order::whereKey($id)
                 ->lockForUpdate()
                 ->firstOrFail();
@@ -251,6 +390,7 @@ class OrderController extends Controller
 
             $totalPagado = (float) $order->payments()->sum('amount');
             $totalOrden = (float) $order->total;
+
             $saldo = round($totalOrden - $totalPagado, 2);
 
             if ($saldo > 0.009) {
@@ -264,7 +404,11 @@ class OrderController extends Controller
             $order->status = 'Entregada';
             $order->save();
 
-            return $order->fresh(['customer', 'details', 'payments']);
+            return $order->fresh([
+                'customer',
+                'details',
+                'payments',
+            ]);
         });
 
         return response()->json([
@@ -272,13 +416,17 @@ class OrderController extends Controller
             'data' => $order,
         ]);
     }
-    
+
+    /**
+     * Ticket de pagos / recepción.
+     */
     public function receiptTicket($id)
     {
         $order = Order::with(['customer', 'details', 'payments'])
             ->findOrFail($id);
 
         $totalPagado = (float) $order->payments()->sum('amount');
+
         $saldo = max(
             0,
             round((float) $order->total - $totalPagado, 2)
@@ -293,6 +441,9 @@ class OrderController extends Controller
         return $pdf->stream('orden-' . $order->id . '-recepcion.pdf');
     }
 
+    /**
+     * Cambiar estado.
+     */
     public function updateStatus(Request $request, string $id)
     {
         $validated = $request->validate([
@@ -307,14 +458,15 @@ class OrderController extends Controller
         $estadoActual = $order->status;
         $nuevoEstado = $validated['status'];
 
-        // Solo permitir Recibida -> En proceso.
+        // Recibida -> En proceso.
         if (
             $estadoActual === 'Recibida' &&
             $nuevoEstado === 'En proceso'
         ) {
             $order->status = 'En proceso';
         }
-        // Solo permitir En proceso -> Lista.
+
+        // En proceso -> Lista.
         elseif (
             $estadoActual === 'En proceso' &&
             $nuevoEstado === 'Lista'
@@ -334,23 +486,29 @@ class OrderController extends Controller
         ]);
     }
 
+    /**
+     * Ticket de entrega.
+     */
     public function ticketEntrega($id)
     {
         $order = Order::with(['customer', 'details', 'payments'])
             ->findOrFail($id);
 
-        // Solo generar el ticket si la orden ya fue entregada.
         if ($order->status !== 'Entregada') {
-            return response()->json(['message' => 'El ticket de entrega solo está disponible para órdenes entregadas.',], 422);
+            return response()->json([
+                'message' => 'El ticket de entrega solo está disponible para órdenes entregadas.',
+            ], 422);
         }
 
         $total = (float) $order->total;
 
         $totalPagado = (float) $order->payments->sum('amount');
 
-        $saldo = max(0, round($total - $totalPagado, 2));
+        $saldo = max(
+            0,
+            round($total - $totalPagado, 2)
+        );
 
-        // Usa aquí el nombre de tu Blade de ticket de entrega.
         $pdf = Pdf::loadView('pdf.orders.ticket-entrega', [
             'order' => $order,
             'total' => $total,
@@ -362,6 +520,4 @@ class OrderController extends Controller
             'ticket-entrega-' . $order->id . '.pdf'
         );
     }
-
-
 }
