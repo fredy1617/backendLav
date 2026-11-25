@@ -30,12 +30,16 @@ Route::middleware('auth:sanctum')->group(function () {
     Route::get('/me', [AuthController::class, 'me']);
     Route::post('/logout', [AuthController::class, 'logout']);
 
-   // ================== DASHBOARD ==========================
+    // ================== DASHBOARD ==========================
     Route::get('/dashboard', [DashboardController::class, 'index']);
     // Listado por categoría
     Route::get('/dashboard/customers/segment/{segment}', [DashboardController::class, 'customers'])->where('segment', 'upcoming|frequent|recover');
     // Detalle de cliente por ID
     Route::get('/dashboard/customers/detail/{customerId}', [DashboardController::class, 'customerDetail'])->whereNumber('customerId');
+    // Notificaciones para la campanita
+    Route::get('/dashboard/notifications', [DashboardController::class, 'notifications']);
+    // Listado de cobijas pendientes para el Dashboard
+    Route::get('/dashboard/blankets-pending', [DashboardController::class, 'blanketsPendingPickup']);
 
     // ================== CLIENTES ==========================
     Route::apiResource('customers', CustomerController::class);

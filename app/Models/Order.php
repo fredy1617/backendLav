@@ -13,6 +13,7 @@ class Order extends Model
         'received_at',
         'estimated_delivery_at',
         'status',
+        'ready_at',
         'observations',
         'subtotal',
         'discount',

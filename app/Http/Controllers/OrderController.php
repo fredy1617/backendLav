@@ -299,11 +299,12 @@ class OrderController extends Controller
             'message' => 'Orden eliminada correctamente.',
         ]);
     }
-
+    
     /**
      * Consultar recomendación de descuento por lealtad.
      *
-     * Se toman las últimas cinco órdenes entregadas del cliente.
+     * El beneficio se recomienda en las órdenes 6, 12, 18, 24...
+     * Se consideran las cinco órdenes entregadas anteriores.
      * No se aplica ningún descuento automáticamente.
      */
     public function customerLoyalty(Request $request, string $customerId)
@@ -321,39 +322,55 @@ class OrderController extends Controller
 
         // Al editar una orden, no contarla como una orden anterior.
         if ($request->filled('exclude_order_id')) {
-            $query->where(
-                'id',
-                '!=',
-                $request->exclude_order_id
+            $query->where('id', '!=', $request->exclude_order_id);
+        }
+
+        // Total de órdenes entregadas anteriores.
+        $totalOrdenes = (clone $query)->count();
+
+        // La recomendación corresponde a las órdenes 6, 12, 18...
+        // Antes de la orden 6 existen 5 entregadas.
+        // Antes de la orden 12 existen 11 entregadas.
+        $elegible = $totalOrdenes > 0 && ($totalOrdenes % 6) === 5;
+
+        $ordenesAnteriores = collect();
+        $gastoAnterior = 0;
+
+        if ($elegible) {
+            // Obtener las últimas cinco órdenes del ciclo actual.
+            $ordenesAnteriores = (clone $query)
+                ->orderByDesc('id')
+                ->limit(5)
+                ->get(['id', 'total']);
+
+            $gastoAnterior = round(
+                (float) $ordenesAnteriores->sum('total'),
+                2
             );
         }
 
-        $orders = $query
-            ->orderByDesc('id')
-            ->limit(5)
-            ->get(['id', 'total']);
+        $numeroSiguiente = $totalOrdenes + 1;
 
-        $cantidad = $orders->count();
-
-        $gastoAnterior = round(
-            (float) $orders->sum('total'),
-            2
-        );
-
-        $recomendacion = $cantidad === 5
+        $recomendacion = $elegible
             ? round($gastoAnterior * 0.10, 2)
             : 0;
 
         return response()->json([
-            'eligible' => $cantidad === 5,
-            'previous_orders' => $cantidad,
+            'eligible' => $elegible,
+            'total_delivered_orders' => $totalOrdenes,
+            'next_order_number' => $numeroSiguiente,
+            'previous_orders' => $elegible
+                ? $ordenesAnteriores->count()
+                : ($totalOrdenes % 6),
             'spending' => $gastoAnterior,
             'recommended_discount' => $recomendacion,
-            'message' => $cantidad === 5
-                ? 'Este cliente cuenta con cinco órdenes entregadas. Se recomienda un descuento del 10% sobre el gasto acumulado de esas órdenes.'
-                : "Este cliente tiene {$cantidad} de 5 órdenes entregadas necesarias para obtener una recomendación.",
+            'message' => $elegible
+                ? "Este cliente está por registrar su orden número {$numeroSiguiente}. Se recomienda un descuento del 10% sobre las últimas cinco órdenes entregadas."
+                : "El cliente lleva {$totalOrdenes} órdenes entregadas. Su próximo beneficio corresponde a la orden número " .
+                    ((intdiv($totalOrdenes, 6) + 1) * 6) . ".",
         ]);
     }
+
 
     /**
      * Ticket de recepción.
@@ -472,6 +489,7 @@ class OrderController extends Controller
             $nuevoEstado === 'Lista'
         ) {
             $order->status = 'Lista';
+            $order->ready_at = now();
         } else {
             return response()->json([
                 'message' => 'El cambio de estado solicitado no está permitido.',
@@ -520,4 +538,53 @@ class OrderController extends Controller
             'ticket-entrega-' . $order->id . '.pdf'
         );
     }
+
+
+    /**
+     * Órdenes con cobijas listas desde hace 15 días o más.
+     */
+    public function blanketsPendingPickup()
+    {
+        $fechaLimite = now()->subDays(15);
+
+        $orders = Order::with([
+            'customer',
+            'details' => function ($query) {
+                $query->where('service_name', 'like', '%cobija%');
+            },
+        ])
+            ->where('status', 'Lista')
+            ->whereNotNull('ready_at')
+            ->where('ready_at', '<=', $fechaLimite)
+            ->whereHas('details', function ($query) {
+                $query->where('service_name', 'like', '%cobija%');
+            })
+            ->orderBy('ready_at')
+            ->get();
+
+        $data = $orders->map(function ($order) {
+            return [
+                'id' => $order->id,
+                'folio' => 'ORD-' . str_pad($order->id, 5, '0', STR_PAD_LEFT),
+                'customer' => $order->customer?->name ?? 'Cliente eliminado',
+                'phone' => $order->customer?->phone,
+                'status' => $order->status,
+                'ready_at' => $order->ready_at,
+                'days_ready' => (int) $order->ready_at->diffInDays(now()),
+                'services' => $order->details->map(function ($detail) {
+                    return [
+                        'service_name' => $detail->service_name,
+                        'quantity' => (float) $detail->quantity,
+                    ];
+                })->values(),
+            ];
+        });
+
+        return response()->json([
+            'success' => true,
+            'data' => $data,
+            'count' => $data->count(),
+        ]);
+    }
+
 }

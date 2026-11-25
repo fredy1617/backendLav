@@ -5,11 +5,14 @@ namespace App\Http\Controllers;
 use App\Models\Order;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Carbon\Carbon;
 
 class DashboardController extends Controller
 {
     /**
-     * Estadísticas y vista rápida del Dashboard.
+     * =========================================================
+     * DASHBOARD GENERAL
+     * =========================================================
      */
     public function index()
     {
@@ -34,6 +37,7 @@ class DashboardController extends Controller
                 ];
             }
 
+            // Actividad reciente
             $data['recent_activity'] = Order::with('customer')
                 ->orderByDesc('id')
                 ->limit(10)
@@ -51,13 +55,76 @@ class DashboardController extends Controller
                 'success' => true,
                 'data' => $data,
             ]);
+
         } catch (\Throwable $e) {
             return $this->errorResponse($e);
         }
     }
 
+
     /**
-     * Lista de hasta 30 clientes de una categoría.
+     * =========================================================
+     * NOTIFICACIONES PARA LA CAMPANITA
+     * =========================================================
+     */
+    public function notifications()
+    {
+        try {
+            // Clientes por recuperar
+            $recoverQuery = $this->customersQuery('recover');
+
+            // Clientes que necesitan atención
+            $upcomingQuery = $this->customersQuery('upcoming');
+
+            // Cobijas pendientes de recoger
+            $blanketsQuery = $this->blanketsQuery();
+
+            $data = [
+                'customers_to_recover' => [
+                    'count' => (clone $recoverQuery)->count(),
+                    'customers' => (clone $recoverQuery)
+                        ->limit(6)
+                        ->get()
+                        ->map(fn ($customer) => $this->formatCustomer($customer)),
+                ],
+
+                'customers_attention' => [
+                    'count' => (clone $upcomingQuery)->count(),
+                    'customers' => (clone $upcomingQuery)
+                        ->limit(6)
+                        ->get()
+                        ->map(fn ($customer) => $this->formatCustomer($customer)),
+                ],
+
+                'blankets_pending' => [
+                    'count' => (clone $blanketsQuery)->count(),
+                    'orders' => (clone $blanketsQuery)
+                        ->limit(6)
+                        ->get()
+                        ->map(fn ($order) => $this->formatBlanketOrder($order)),
+                ],
+            ];
+
+            $data['total'] =
+                $data['customers_to_recover']['count'] +
+                $data['customers_attention']['count'] +
+                $data['blankets_pending']['count'];
+
+            return response()->json([
+                'success' => true,
+                'data' => $data,
+            ]);
+
+        } catch (\Throwable $e) {
+            return $this->errorResponse($e);
+        }
+    }
+
+
+    /**
+     * =========================================================
+     * CLIENTES POR CATEGORÍA
+     * =========================================================
      */
     public function customers(Request $request, string $segment)
     {
@@ -91,14 +158,18 @@ class DashboardController extends Controller
                 'data' => $customers,
                 'count' => $customers->count(),
             ]);
+
         } catch (\Throwable $e) {
             return $this->errorResponse($e);
         }
     }
 
+
     /**
-     * Información completa e historial de órdenes de un cliente.
-     */    
+     * =========================================================
+     * DETALLE DE CLIENTE
+     * =========================================================
+     */
     public function customerDetail($customerId)
     {
         try {
@@ -123,6 +194,7 @@ class DashboardController extends Controller
                         'folio' => 'ORD-' . str_pad($order->id, 5, '0', STR_PAD_LEFT),
                         'received_at' => $order->received_at,
                         'estimated_delivery_at' => $order->estimated_delivery_at,
+                        'ready_at' => $order->ready_at,
                         'status' => $order->status,
                         'observations' => $order->observations,
                         'subtotal' => (float) ($order->subtotal ?? 0),
@@ -136,13 +208,10 @@ class DashboardController extends Controller
                             'subtotal' => (float) $detail->subtotal,
                         ])->values(),
                     ];
-                })
-                ->values();
+                })->values();
 
-            // Filtrar órdenes entregadas
             $delivered = $orders->where('status', 'Entregada');
 
-            // Última visita del cliente
             $lastVisit = $delivered->first()['received_at'] ?? null;
 
             return response()->json([
@@ -156,10 +225,7 @@ class DashboardController extends Controller
                     'summary' => [
                         'total_orders' => $orders->count(),
                         'delivered_orders' => $delivered->count(),
-                        'total_spent' => round(
-                            (float) $delivered->sum('total'),
-                            2
-                        ),
+                        'total_spent' => round((float) $delivered->sum('total'), 2),
                         'last_visit' => $lastVisit,
                     ],
                     'orders' => $orders,
@@ -173,9 +239,86 @@ class DashboardController extends Controller
 
 
     /**
-     * Consulta común para clasificar clientes.
-     *
-     * Solo considera órdenes entregadas durante los últimos 90 días.
+     * =========================================================
+     * LISTADO DE COBIJAS PENDIENTES PARA EL DASHBOARD
+     * =========================================================
+     */
+    public function blanketsPendingPickup()
+    {
+        try {
+            $orders = $this->blanketsQuery()
+                ->get()
+                ->map(fn ($order) => $this->formatBlanketOrder($order));
+
+            return response()->json([
+                'success' => true,
+                'data' => $orders,
+                'count' => $orders->count(),
+            ]);
+
+        } catch (\Throwable $e) {
+            return $this->errorResponse($e);
+        }
+    }
+
+
+    /**
+     * =========================================================
+     * CONSULTA BASE DE COBIJAS
+     * =========================================================
+     */
+    private function blanketsQuery()
+    {
+        $fechaLimite = now()->subDays(15);
+
+        return Order::with([
+            'customer',
+            'details' => function ($query) {
+                $query->where('service_name', 'like', '%cobija%');
+            },
+        ])
+            ->where('status', 'Lista')
+            ->whereNotNull('ready_at')
+            ->where('ready_at', '<=', $fechaLimite)
+            ->whereHas('details', function ($query) {
+                $query->where('service_name', 'like', '%cobija%');
+            })
+            ->orderBy('ready_at');
+    }
+
+
+    /**
+     * =========================================================
+     * FORMATEAR ORDEN CON COBIJAS
+     * =========================================================
+     */
+    private function formatBlanketOrder($order): array
+    {
+        return [
+            'id' => $order->id,
+            'folio' => 'ORD-' . str_pad($order->id, 5, '0', STR_PAD_LEFT),
+            'customer_id' => $order->customer_id,
+            'customer' => $order->customer?->name ?? 'Cliente eliminado',
+            'phone' => $order->customer?->phone,
+            'status' => $order->status,
+            'ready_at' => $order->ready_at,
+            'days_ready' => $order->ready_at
+                ? (int) Carbon::parse($order->ready_at)->diffInDays(now())
+                : 0,
+            'services' => $order->details->map(fn ($detail) => [
+                'id' => $detail->id,
+                'service_name' => $detail->service_name,
+                'quantity' => (float) $detail->quantity,
+            ])->values(),
+            'total' => (float) $order->total,
+        ];
+    }
+
+
+    /**
+     * =========================================================
+     * CONSULTA BASE DE CLIENTES
+     * =========================================================
      */
     private function customersQuery(string $segment)
     {
@@ -205,7 +348,6 @@ class DashboardController extends Controller
             );
 
         if ($segment === 'upcoming') {
-            // Cuatro órdenes entregadas: falta una para completar cinco.
             $query->where('stats.services_count', '=', 4);
         }
 
@@ -228,6 +370,12 @@ class DashboardController extends Controller
         return $query;
     }
 
+
+    /**
+     * =========================================================
+     * FORMATEAR CLIENTE
+     * =========================================================
+     */
     private function formatCustomer($customer): array
     {
         return [
@@ -238,11 +386,17 @@ class DashboardController extends Controller
             'total_spent' => (float) $customer->total_spent,
             'last_visit' => $customer->last_visit,
             'days_without_visit' => $customer->last_visit
-                ? (int) \Carbon\Carbon::parse($customer->last_visit)->diffInDays(now())
+                ? (int) Carbon::parse($customer->last_visit)->diffInDays(now())
                 : null,
         ];
     }
 
+
+    /**
+     * =========================================================
+     * MANEJO DE ERRORES
+     * =========================================================
+     */
     private function errorResponse(\Throwable $e)
     {
         \Log::error('Error en Dashboard: ' . $e->getMessage(), [
